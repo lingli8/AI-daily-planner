@@ -1,6 +1,6 @@
 # ultimate_planner.py
 # Ultimate AI Daily Planner by Lingli Yang
-# Professional-grade productivity app with advanced features
+# Professional-grade productivity app with advanced features and database
 
 import streamlit as st
 import pandas as pd
@@ -10,6 +10,143 @@ from datetime import datetime, timedelta
 import json
 import time
 import io
+import sqlite3
+
+# Database Class
+class PlannerDatabase:
+    def __init__(self, db_path="planner.db"):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Initialize SQLite database with required tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Create schedules table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT DEFAULT 'default_user',
+                schedule_name TEXT NOT NULL,
+                tasks_data TEXT NOT NULL,
+                schedule_data TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create user preferences table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT DEFAULT 'default_user',
+                start_hour INTEGER DEFAULT 7,
+                end_hour INTEGER DEFAULT 22,
+                breakfast_time TEXT DEFAULT '08:00',
+                lunch_time TEXT DEFAULT '12:30',
+                dinner_time TEXT DEFAULT '18:30',
+                default_break INTEGER DEFAULT 10,
+                pomodoro_work INTEGER DEFAULT 25,
+                pomodoro_short_break INTEGER DEFAULT 5,
+                pomodoro_long_break INTEGER DEFAULT 20,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create analytics table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS analytics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT DEFAULT 'default_user',
+                date DATE NOT NULL,
+                total_tasks INTEGER DEFAULT 0,
+                completed_tasks INTEGER DEFAULT 0,
+                total_work_time INTEGER DEFAULT 0,
+                pomodoro_sessions INTEGER DEFAULT 0,
+                productivity_score REAL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def save_schedule(self, schedule_name, tasks, schedule):
+        """Save a complete schedule to database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Convert data to JSON strings
+        tasks_json = json.dumps(tasks)
+        schedule_json = json.dumps(schedule, default=str)  # Handle datetime objects
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO schedules 
+            (user_id, schedule_name, tasks_data, schedule_data, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', ('default_user', schedule_name, tasks_json, schedule_json, datetime.now()))
+        
+        conn.commit()
+        conn.close()
+        return cursor.lastrowid
+    
+    def load_schedule(self, schedule_name):
+        """Load a schedule from database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT tasks_data, schedule_data FROM schedules 
+            WHERE user_id = ? AND schedule_name = ?
+            ORDER BY updated_at DESC LIMIT 1
+        ''', ('default_user', schedule_name))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            tasks = json.loads(result[0])
+            schedule = json.loads(result[1])
+            return tasks, schedule
+        return None, None
+    
+    def get_all_schedules(self):
+        """Get list of all saved schedules"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT schedule_name, created_at, updated_at 
+            FROM schedules 
+            WHERE user_id = ?
+            ORDER BY updated_at DESC
+        ''', ('default_user',))
+        
+        schedules = cursor.fetchall()
+        conn.close()
+        return schedules
+    
+    def delete_schedule(self, schedule_name):
+        """Delete a schedule"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            DELETE FROM schedules 
+            WHERE user_id = ? AND schedule_name = ?
+        ''', ('default_user', schedule_name))
+        
+        conn.commit()
+        conn.close()
+
+# Initialize database
+@st.cache_resource
+def init_database():
+    return PlannerDatabase()
+
+# Get database instance
+db = init_database()
 
 # Page setup
 st.set_page_config(
@@ -618,6 +755,37 @@ st.session_state.meal_times['dinner'] = st.sidebar.time_input(
     "Dinner", datetime.strptime("18:30", "%H:%M").time()
 ).strftime("%H:%M")
 
+# Database Save/Load functionality
+st.sidebar.subheader("💾 Save & Load Schedules")
+
+# Save current schedule
+if st.session_state.schedule:
+    schedule_name = st.sidebar.text_input("Schedule name:", f"Schedule_{datetime.now().strftime('%m%d_%H%M')}")
+    if st.sidebar.button("💾 Save Current Schedule"):
+        try:
+            db.save_schedule(schedule_name, st.session_state.tasks, st.session_state.schedule)
+            st.sidebar.success(f"Saved '{schedule_name}'!")
+        except Exception as e:
+            st.sidebar.error(f"Error: {e}")
+
+# Load saved schedules
+try:
+    schedules = db.get_all_schedules()
+    if schedules:
+        schedule_options = [f"{s[0]} ({s[2][:10]})" for s in schedules]
+        selected = st.sidebar.selectbox("Load saved schedule:", [""] + schedule_options)
+        
+        if selected and st.sidebar.button("📂 Load Schedule"):
+            schedule_name = selected.split(" (")[0]
+            tasks, schedule = db.load_schedule(schedule_name)
+            if tasks and schedule:
+                st.session_state.tasks = tasks
+                st.session_state.schedule = schedule
+                st.sidebar.success(f"Loaded '{schedule_name}'!")
+                st.rerun()
+except Exception as e:
+    st.sidebar.info("Database initializing...")
+
 # Advanced settings
 with st.sidebar.expander("🔧 Advanced Settings"):
     default_break = st.slider("Default break (minutes)", 5, 30, 10)
@@ -725,11 +893,11 @@ with col2:
             st.sidebar.error("Add activities first!")
 
 # File operations
-st.sidebar.subheader("💾 Save & Load")
+st.sidebar.subheader("📊 Export Data")
 col1, col2 = st.sidebar.columns(2)
 
 with col1:
-    if st.button("💾 Save Schedule") and st.session_state.schedule:
+    if st.button("💾 Export CSV") and st.session_state.schedule:
         export_data = export_schedule_data()
         if export_data is not None:
             csv = export_data.to_csv(index=False)
@@ -741,12 +909,12 @@ with col1:
             )
 
 with col2:
-    if st.button("📊 Export Analytics") and st.session_state.schedule:
+    if st.button("📈 Export Analytics") and st.session_state.schedule:
         analytics_data = create_analytics_dashboard()
         if analytics_data is not None:
             csv = analytics_data.to_csv(index=False)
             st.sidebar.download_button(
-                label="📈 Download Analytics",
+                label="📊 Download Data",
                 data=csv,
                 file_name=f"analytics_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv"
@@ -1115,7 +1283,7 @@ with tab4:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; padding: 20px;">
-<h3>🛠️ Ultimate AI Daily Planner</h3>
+<h3>🛠️ Ultimate AI Daily Planner with Database</h3>
 <p><strong>Created by Lingli Yang</strong> - Python Developer & Data Analyst</p>
 
 <div style="display: flex; justify-content: center; gap: 30px; flex-wrap: wrap; margin: 20px 0;">
@@ -1130,19 +1298,19 @@ st.markdown("""
 </div>
 
 <div style="text-align: left;">
-<h4>📊 Analytics & Insights:</h4>
+<h4>📊 Analytics & Database:</h4>
 <ul style="list-style: none; padding: 0;">
-<li>✅ Real-time productivity tracking</li>
+<li>✅ SQLite database persistence</li>
+<li>✅ Save/load multiple schedules</li>
 <li>✅ Advanced data visualizations</li>
 <li>✅ Progress monitoring & achievements</li>
-<li>✅ Weekly productivity trends</li>
 </ul>
 </div>
 
 <div style="text-align: left;">
 <h4>💎 Premium Features:</h4>
 <ul style="list-style: none; padding: 0;">
-<li>✅ Export to multiple formats</li>
+<li>✅ Export to CSV format</li>
 <li>✅ Smart task suggestions</li>
 <li>✅ Theme customization</li>
 <li>✅ Schedule history tracking</li>
@@ -1151,12 +1319,12 @@ st.markdown("""
 </div>
 
 <div style="background: linear-gradient(45deg, #667eea, #764ba2); color: white; padding: 15px; border-radius: 10px; margin: 20px 0;">
-<strong>🚀 Technologies Used:</strong> Python • Streamlit • Plotly • Pandas • Advanced AI Algorithms<br>
+<strong>🚀 Technologies Used:</strong> Python • Streamlit • SQLite • Plotly • Pandas • Advanced AI Algorithms<br>
 <strong>📧 Contact:</strong> liliyang08@outlook.com • <strong>🔗 LinkedIn:</strong> linkedin.com/in/lingli-yang-74430a383
 </div>
 
 <p style="color: #666; font-style: italic;">
-🌟 Transforming daily chaos into organized productivity through intelligent AI scheduling 🌟
+🌟 Transforming daily chaos into organized productivity through intelligent AI scheduling with persistent data storage 🌟
 </p>
 </div>
 """, unsafe_allow_html=True)
